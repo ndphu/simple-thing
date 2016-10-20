@@ -3,7 +3,8 @@
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
-#include "WiFiUdp.h"
+#include <WiFiUDP.h>
+#include <Ticker.h>
 
 // Define AP Configuration
 #define AP_IP IPAddress(19,11,20,12)
@@ -16,6 +17,11 @@
 // MQTT
 #define COMMAND_TOPIC "esp_general_command"
 #define HEALTH_CHECK_TOPIC "esp_health_check"
+
+// Ticker
+Ticker flipper;
+// Udp
+WiFiUDP Udp;
 
 int lastWiFiReconnect;
 WiFiManager wifiManager;
@@ -70,6 +76,8 @@ void initWifiManager(uint timeout = 180) {
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("Connected to " + WiFi.SSID());
       initPubSubClient();
+      //Udp.begin(1900);
+      //Udp.beginMulticast(WiFi.localIP(), IPAddress(237,0,0,1), 1900);
     }
   }
   free(apName);
@@ -86,23 +94,35 @@ void checkMQTTConnection() {
       connectToBroker();
   }
 }
-
+int count = 0;
 void sendMulticast() {
   // send a reply, to the IP address and port that sent us the packet we received
-  Serial.println("Sending multicast...");
-  WiFiUDP Udp = WiFiUDP();
-  Udp.beginMulticast(WiFi.localIP(), IPAddress(239,255,255,250), 1900);
-  Udp.beginPacket(Udp.remoteIP(), Udp.remotePort());
-  Udp.write("ESP-");
-  Udp.print(system_get_chip_id(),HEX);
-  Udp.print(":");
-  Udp.print(WiFi.localIP());
-  Udp.endPacket();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Sending multicast... " + String(count++));
+    //Udp.beginMulticast(WiFi.localIP(), IPAddress(237,0,0,1), 1900);
+
+    //if (Udp.beginPacket(IPAddress(192,168,1,11), 19000) == 1) {
+    if (Udp.beginPacketMulticast(IPAddress(237,0,0,1), 1900, WiFi.localIP())) {
+      Serial.println("Writing packet...");
+      Udp.printf("ESP-%d:%s\r\n",  ESP.getChipId(), WiFi.localIP().toString().c_str());
+      if (Udp.endPacket() == 1) {
+        Serial.println("Packet sent!");
+      }
+    } else {
+      Serial.println("Failed to begin multicast packet");
+    }
+    //Udp.beginPacket(IPAddress(237,0,0,1), 1900);
+    //Udp.beginPacket(IPAddress(237,0,0,1), 1900);
+
+    //Udp.flush();
+    //yield();
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   initWifiManager();
+  //flipper.attach(2, sendMulticast);
 }
 
 
@@ -112,6 +132,6 @@ void loop() {
   if (client.connected()) {
     client.loop();
   }
-
   sendMulticast();
+  yield();
 }
