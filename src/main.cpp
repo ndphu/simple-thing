@@ -5,28 +5,38 @@
 #include <PubSubClient.h>
 #include <WiFiUDP.h>
 #include <Ticker.h>
+#include <ESP8266SSDP.h>
 
 // Define AP Configuration
 #define AP_IP IPAddress(19,11,20,12)
 #define AP_GATEWAY IPAddress(19,11,20,12)
 #define AP_SUBNET IPAddress(255, 255, 255, 0)
-#define WIFI_RECONNECT_INTERVAL 30 * 1000
+String apName;
+
+
 #define BROKER_HOST "iot.eclipse.org"
 #define BROKER_PORT 1883
 
 // MQTT
-#define COMMAND_TOPIC "esp_general_command"
+#define GENERAL_COMMAND_TOPIC "esp_general_command"
 #define HEALTH_CHECK_TOPIC "esp_health_check"
-
+String deviceCommandTopic;
 // Ticker
-Ticker flipper;
-// Udp
-WiFiUDP Udp;
+#define BLINK_LED 2
+Ticker blink;
 
-int lastWiFiReconnect;
+void blinkLed() {
+  int state = digitalRead(BLINK_LED);
+  digitalWrite(BLINK_LED, !state);
+}
+
 WiFiManager wifiManager;
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
+
+// SSDP
+#define SSDP_HTTP_PORT 8080
+ESP8266WebServer SSDP_HTTP(SSDP_HTTP_PORT);
 
 void connectToBroker() {
   Serial.println("Attempting MQTT connection...");
@@ -34,9 +44,13 @@ void connectToBroker() {
   sprintf(clientId, "ESP8266Client-%d", ESP.getChipId());
   if (client.connect(clientId)) {
     Serial.println("connected");
-    client.subscribe(COMMAND_TOPIC);
-    Serial.print("Subscribeb to ");
-    Serial.println(COMMAND_TOPIC);
+    client.subscribe(GENERAL_COMMAND_TOPIC);
+    Serial.print("Subscribeb to general command topic ");
+    Serial.printf("\"%s\"\n", GENERAL_COMMAND_TOPIC);
+
+    client.subscribe(deviceCommandTopic.c_str());
+    Serial.print("Subscribeb to device command topic ");
+    Serial.printf("\"%s\"\n", deviceCommandTopic.c_str());
   } else {
     Serial.print("failed, rc=");
     Serial.print(client.state());
@@ -60,7 +74,39 @@ void initPubSubClient() {
   client.setCallback(callback);
 }
 
+void initSSDPDeviceInfo() {
+  SSDP.setSchemaURL("description.xml");
+  SSDP.setHTTPPort(SSDP_HTTP_PORT);
+  SSDP.setName("The Lamp");
+  SSDP.setSerialNumber(String(ESP.getChipId()));
+  SSDP.setURL("index.html");
+  SSDP.setModelName("DYI Smart Thing");
+  SSDP.setModelURL("http://19november.ddns.net:8080/model/dyi_smart_thing/1.0");
+  SSDP.setModelNumber("1.0");
+  SSDP.setManufacturer("Espressif NodeMCU");
+  SSDP.setManufacturerURL("http://19november.ddns.net:8080/about");
+}
+
+void initSSDP() {
+  SSDP_HTTP.on("/description.json", HTTP_GET, [](){
+    SSDP_HTTP.send(200, "application/json", "Hello World!");
+  });
+  SSDP_HTTP.on("/description.xml", HTTP_GET, [](){
+    SSDP.schema(SSDP_HTTP.client());
+  });
+  SSDP_HTTP.begin();
+
+  Serial.printf("Starting SSDP...\n");
+  SSDP.begin();
+}
+
+void initAfterConnected() {
+  initPubSubClient();
+  initSSDP();
+}
+
 void initWifiManager(uint timeout = 180) {
+  blink.attach(0.1, blinkLed);
   Serial.println("Starting WiFiManager configuration...");
   wifiManager.setConfigPortalTimeout(timeout);
   wifiManager.setDebugOutput(true);
@@ -68,19 +114,18 @@ void initWifiManager(uint timeout = 180) {
   wifiManager.setAPStaticIPConfig(AP_IP,AP_GATEWAY, AP_SUBNET);
 
   int chipId = ESP.getChipId();
-  char * apName = (char*)malloc(50 * sizeof(char));
-  sprintf(apName, "ESP8266-%d", chipId);
-  if(!wifiManager.autoConnect(apName)) {
+
+  if(!wifiManager.autoConnect(apName.c_str())) {
     Serial.println("Failed to connect and hit timeout");
   } else {
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("Connected to " + WiFi.SSID());
-      initPubSubClient();
-      //Udp.begin(1900);
-      //Udp.beginMulticast(WiFi.localIP(), IPAddress(237,0,0,1), 1900);
+      blink.detach();
+      yield();
+      digitalWrite(BLINK_LED, LOW);
+      initAfterConnected();
     }
   }
-  free(apName);
 }
 
 void checkWiFiConnection() {
@@ -94,44 +139,29 @@ void checkMQTTConnection() {
       connectToBroker();
   }
 }
-int count = 0;
-void sendMulticast() {
-  // send a reply, to the IP address and port that sent us the packet we received
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("Sending multicast... " + String(count++));
-    //Udp.beginMulticast(WiFi.localIP(), IPAddress(237,0,0,1), 1900);
-
-    //if (Udp.beginPacket(IPAddress(192,168,1,11), 19000) == 1) {
-    if (Udp.beginPacketMulticast(IPAddress(237,0,0,1), 1900, WiFi.localIP())) {
-      Serial.println("Writing packet...");
-      Udp.printf("ESP-%d:%s\r\n",  ESP.getChipId(), WiFi.localIP().toString().c_str());
-      if (Udp.endPacket() == 1) {
-        Serial.println("Packet sent!");
-      }
-    } else {
-      Serial.println("Failed to begin multicast packet");
-    }
-    //Udp.beginPacket(IPAddress(237,0,0,1), 1900);
-    //Udp.beginPacket(IPAddress(237,0,0,1), 1900);
-
-    //Udp.flush();
-    //yield();
-  }
-}
 
 void setup() {
   Serial.begin(115200);
+  apName = "ESP8266-" + String(ESP.getChipId());
+  pinMode(BLINK_LED, OUTPUT);
+  deviceCommandTopic = "esp_" + String(ESP.getChipId()) + "_command";
+  initSSDPDeviceInfo();
   initWifiManager();
-  //flipper.attach(2, sendMulticast);
 }
 
 
 void loop() {
   checkWiFiConnection();
-  //checkMQTTConnection();
+  checkMQTTConnection();
+  if (WiFi.status() == WL_CONNECTED) {
+    SSDP_HTTP.handleClient();
+    yield();
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+
+  }
   if (client.connected()) {
     client.loop();
+    yield();
   }
-  sendMulticast();
-  yield();
 }
