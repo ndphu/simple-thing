@@ -6,20 +6,21 @@
 #include <WiFiUDP.h>
 #include <Ticker.h>
 #include <ESP8266SSDP.h>
+#include <ArduinoJson.h>
 
 // Define AP Configuration
 #define AP_IP IPAddress(19,11,20,12)
 #define AP_GATEWAY IPAddress(19,11,20,12)
 #define AP_SUBNET IPAddress(255, 255, 255, 0)
-String apName;
-
+String accessPointName;
 
 #define BROKER_HOST "iot.eclipse.org"
 #define BROKER_PORT 1883
+String clientId;
 
 // MQTT
-#define GENERAL_COMMAND_TOPIC "esp_general_command"
-#define HEALTH_CHECK_TOPIC "esp_health_check"
+#define GENERAL_COMMAND_TOPIC "esp8266/all_devices/command"
+#define ONLINE_NOTIFICATION_TOPIC "esp8266/all_devices/notify/online"
 String deviceCommandTopic;
 // Ticker
 #define BLINK_LED 2
@@ -29,6 +30,10 @@ void blinkLed() {
   int state = digitalRead(BLINK_LED);
   digitalWrite(BLINK_LED, !state);
 }
+// Health
+Ticker healthCheck;
+bool publishHealthFlag = false;
+String deviceHealthTopic;
 
 WiFiManager wifiManager;
 WiFiClient wifiClient;
@@ -38,35 +43,66 @@ PubSubClient client(wifiClient);
 #define SSDP_HTTP_PORT 8080
 ESP8266WebServer SSDP_HTTP(SSDP_HTTP_PORT);
 
-void connectToBroker() {
-  Serial.println("Attempting MQTT connection...");
-  char * clientId = (char*)malloc(32 * sizeof(char));
-  sprintf(clientId, "ESP8266Client-%d", ESP.getChipId());
-  if (client.connect(clientId)) {
-    Serial.println("connected");
-    client.subscribe(GENERAL_COMMAND_TOPIC);
-    Serial.print("Subscribeb to general command topic ");
-    Serial.printf("\"%s\"\n", GENERAL_COMMAND_TOPIC);
-
-    client.subscribe(deviceCommandTopic.c_str());
-    Serial.print("Subscribeb to device command topic ");
-    Serial.printf("\"%s\"\n", deviceCommandTopic.c_str());
-  } else {
-    Serial.print("failed, rc=");
-    Serial.print(client.state());
-    Serial.println("");
-  }
-  free(clientId);
+void setPublishHealthFlag() {
+  publishHealthFlag = true;
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("[");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
+void publishHealthMessage() {
+  if (client.connected()) {
+    StaticJsonBuffer<400> jsonBuffer;
+    JsonObject& root = jsonBuffer.createObject();
+    root["chipId"] = String(ESP.getChipId());
+    root["uptime"] = millis();
+    root["freeHeap"] = String(ESP.getFreeHeap());
+    int length = root.measureLength() + 1;
+    char buffer[length];
+    root.printTo(buffer, length);
+    client.publish(deviceHealthTopic.c_str(), buffer);
+    publishHealthFlag = false;
   }
-  Serial.println();
+}
+
+void publishOnlineMessage() {
+  if (client.connected()) {
+    StaticJsonBuffer<400> jsonBuffer;
+    JsonObject& root = jsonBuffer.createObject();
+    root["chipId"] = String(ESP.getChipId());
+    root["uptime"] = millis();
+    root["coreVersion"] = ESP.getCoreVersion();
+    root["cpuFreqMHz"] = ESP.getCpuFreqMHz();
+    root["flashChipId"] = String(ESP.getFlashChipId());
+    root["freeHeap"] = String(ESP.getFreeHeap());
+    root["sdkVersion"] = ESP.getSdkVersion();
+    root["coreVersion"] = ESP.getCoreVersion();
+    int length = root.measureLength() + 1;
+    char buffer[length];
+    root.printTo(buffer, length);
+    client.publish(ONLINE_NOTIFICATION_TOPIC, buffer);
+
+  }
+}
+
+void connectToBroker() {
+  Serial.printf("Connecting to MQTT broker [ %s:%d ]... \n", BROKER_HOST, BROKER_PORT);
+  if (client.connect(clientId.c_str())) {
+    client.subscribe(GENERAL_COMMAND_TOPIC);
+    Serial.printf("Subscribeb to general command topic \"%s\"\n", GENERAL_COMMAND_TOPIC);
+    client.subscribe(deviceCommandTopic.c_str());
+    Serial.printf("Subscribeb to device command topic \"%s\"\n", deviceCommandTopic.c_str());
+    publishOnlineMessage();
+    healthCheck.attach(15, setPublishHealthFlag);
+  } else {
+    Serial.printf("failed, rc=%d\n", client.state());
+    healthCheck.detach();
+  }
+}
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.printf("Topic: %s\n", topic);
+  StaticJsonBuffer<200> jsonBuffer;
+  JsonObject& msgJson = jsonBuffer.parseObject((char*)payload);
+  const char* name = msgJson["name"];
+  Serial.printf("%s\n", name);
+
 }
 
 void initPubSubClient() {
@@ -88,7 +124,7 @@ void initSSDPDeviceInfo() {
 }
 
 void initSSDP() {
-  SSDP_HTTP.on("/description.json", HTTP_GET, [](){
+  SSDP_HTTP.on("/devices", HTTP_GET, [](){
     SSDP_HTTP.send(200, "application/json", "Hello World!");
   });
   SSDP_HTTP.on("/description.xml", HTTP_GET, [](){
@@ -115,7 +151,7 @@ void initWifiManager(uint timeout = 180) {
 
   int chipId = ESP.getChipId();
 
-  if(!wifiManager.autoConnect(apName.c_str())) {
+  if(!wifiManager.autoConnect(accessPointName.c_str())) {
     Serial.println("Failed to connect and hit timeout");
   } else {
     if (WiFi.status() == WL_CONNECTED) {
@@ -142,13 +178,13 @@ void checkMQTTConnection() {
 
 void setup() {
   Serial.begin(115200);
-  apName = "ESP8266-" + String(ESP.getChipId());
+  clientId = accessPointName = "ESP8266-" + String(ESP.getChipId());
   pinMode(BLINK_LED, OUTPUT);
   deviceCommandTopic = "esp_" + String(ESP.getChipId()) + "_command";
+  deviceHealthTopic = "esp8266/" + String(ESP.getChipId()) + "/health";
   initSSDPDeviceInfo();
   initWifiManager();
 }
-
 
 void loop() {
   checkWiFiConnection();
@@ -157,10 +193,11 @@ void loop() {
     SSDP_HTTP.handleClient();
     yield();
   }
-  if (WiFi.status() == WL_CONNECTED) {
 
-  }
   if (client.connected()) {
+    if (publishHealthFlag) {
+      publishHealthMessage();
+    }
     client.loop();
     yield();
   }
