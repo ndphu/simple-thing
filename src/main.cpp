@@ -7,6 +7,8 @@
 #include <Ticker.h>
 #include <ESP8266SSDP.h>
 #include <ArduinoJson.h>
+#include "Device.h"
+#include "DeviceManager.h"
 
 // Define AP Configuration
 #define AP_IP IPAddress(19,11,20,12)
@@ -14,8 +16,10 @@
 #define AP_SUBNET IPAddress(255, 255, 255, 0)
 String accessPointName;
 
-#define BROKER_HOST "iot.eclipse.org"
-#define BROKER_PORT 1883
+//#define BROKER_HOST "iot.eclipse.org"
+#define BROKER_HOST "19november.ddns.net"
+//#define BROKER_PORT 1883
+#define BROKER_PORT 5354
 String clientId;
 
 // MQTT
@@ -47,6 +51,19 @@ void setPublishHealthFlag() {
   publishHealthFlag = true;
 }
 
+Device d1("switch1", TYPE_SWITCH);
+Device d2("sensor1", TYPE_SENSOR);
+Device d3("switch2", TYPE_SWITCH);
+
+DeviceManager deviceManager;
+
+void publishJsonObject(const char * topic, JsonObject &obj) {
+  int length = obj.measureLength() + 1;
+  char buffer[length];
+  obj.printTo(buffer, length);
+  client.publish(topic, buffer);
+}
+
 void publishHealthMessage() {
   if (client.connected()) {
     StaticJsonBuffer<400> jsonBuffer;
@@ -54,13 +71,11 @@ void publishHealthMessage() {
     root["chipId"] = String(ESP.getChipId());
     root["uptime"] = millis();
     root["freeHeap"] = String(ESP.getFreeHeap());
-    int length = root.measureLength() + 1;
-    char buffer[length];
-    root.printTo(buffer, length);
-    client.publish(deviceHealthTopic.c_str(), buffer);
+    publishJsonObject(deviceHealthTopic.c_str(), root);
     publishHealthFlag = false;
   }
 }
+
 
 void publishOnlineMessage() {
   if (client.connected()) {
@@ -74,11 +89,7 @@ void publishOnlineMessage() {
     root["freeHeap"] = String(ESP.getFreeHeap());
     root["sdkVersion"] = ESP.getSdkVersion();
     root["coreVersion"] = ESP.getCoreVersion();
-    int length = root.measureLength() + 1;
-    char buffer[length];
-    root.printTo(buffer, length);
-    client.publish(ONLINE_NOTIFICATION_TOPIC, buffer);
-
+    publishJsonObject(ONLINE_NOTIFICATION_TOPIC, root);
   }
 }
 
@@ -113,7 +124,7 @@ void initPubSubClient() {
 void initSSDPDeviceInfo() {
   SSDP.setSchemaURL("description.xml");
   SSDP.setHTTPPort(SSDP_HTTP_PORT);
-  SSDP.setName("The Lamp");
+  SSDP.setName(String(ESP.getChipId()));
   SSDP.setSerialNumber(String(ESP.getChipId()));
   SSDP.setURL("index.html");
   SSDP.setModelName("DYI Smart Thing");
@@ -123,13 +134,21 @@ void initSSDPDeviceInfo() {
   SSDP.setManufacturerURL("http://19november.ddns.net:8080/about");
 }
 
-void initSSDP() {
-  SSDP_HTTP.on("/devices", HTTP_GET, [](){
-    SSDP_HTTP.send(200, "application/json", "Hello World!");
+void initDeviceManager() {
+  SSDP_HTTP.on("/devices", HTTP_GET, []() {
+    deviceManager.devices(SSDP_HTTP.client());
   });
+
+  SSDP_HTTP.on("/jsonrpc", HTTP_POST, [](){
+    deviceManager.jsonrpc(SSDP_HTTP.arg("plain").c_str(), SSDP_HTTP.client());
+  });
+}
+
+void initSSDP() {
   SSDP_HTTP.on("/description.xml", HTTP_GET, [](){
     SSDP.schema(SSDP_HTTP.client());
   });
+
   SSDP_HTTP.begin();
 
   Serial.printf("Starting SSDP...\n");
@@ -138,6 +157,7 @@ void initSSDP() {
 
 void initAfterConnected() {
   initPubSubClient();
+  initDeviceManager();
   initSSDP();
 }
 
@@ -183,6 +203,9 @@ void setup() {
   deviceCommandTopic = "esp_" + String(ESP.getChipId()) + "_command";
   deviceHealthTopic = "esp8266/" + String(ESP.getChipId()) + "/health";
   initSSDPDeviceInfo();
+  deviceManager.addDevice(&d1);
+  deviceManager.addDevice(&d2);
+  deviceManager.addDevice(&d3);
   initWifiManager();
 }
 
@@ -191,7 +214,6 @@ void loop() {
   checkMQTTConnection();
   if (WiFi.status() == WL_CONNECTED) {
     SSDP_HTTP.handleClient();
-    yield();
   }
 
   if (client.connected()) {
@@ -199,6 +221,5 @@ void loop() {
       publishHealthMessage();
     }
     client.loop();
-    yield();
   }
 }
