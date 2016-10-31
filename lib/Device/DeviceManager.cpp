@@ -85,7 +85,8 @@ void DeviceManager::jsonrpc(const char* rawMessage, WiFiClient client) {
     returnMessage(client, 404, "Device not found", deviceNotFound);
     return;
   }
-  
-  returnMessage(client, 200, "OK", "{\"jsonrpc\": \"2.0\", \"method\": \"foobar\"}");
 
+  returnMessage(client, 200, "OK", "{\"jsonrpc\": \"2.0\", \"method\": \"foobar\"}");
 }
+
+DeviceManager deviceManager;

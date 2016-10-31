@@ -21,5 +21,5 @@ public:
   void handleDeviceRequest(const char* deviceName, ESP8266WebServer client);
 
 };
-
+extern DeviceManager deviceManager;
 #endif

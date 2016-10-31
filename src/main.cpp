@@ -9,7 +9,14 @@
 #include <ArduinoJson.h>
 #include "Device.h"
 #include "DeviceManager.h"
+#include <Wire.h>
+#include "SSD1306.h"
+#include "OLEDDisplayUi.h"
+#include "images.h"
+#include "fonts.h"
+#include "utils.h"
 
+ADC_MODE(ADC_VCC);
 // Define AP Configuration
 #define AP_IP IPAddress(19,11,20,12)
 #define AP_GATEWAY IPAddress(19,11,20,12)
@@ -17,9 +24,8 @@
 String accessPointName;
 
 //#define BROKER_HOST "iot.eclipse.org"
-#define BROKER_HOST "19november.ddns.net"
-//#define BROKER_PORT 1883
-#define BROKER_PORT 5354
+#define BROKER_HOST "broker.hivemq.com"
+#define BROKER_PORT 1883
 String clientId;
 
 // MQTT
@@ -39,6 +45,10 @@ Ticker healthCheck;
 bool publishHealthFlag = false;
 String deviceHealthTopic;
 
+// display
+SSD1306  display(0x3c, D6, D5);
+OLEDDisplayUi ui     ( &display );
+
 WiFiManager wifiManager;
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
@@ -51,11 +61,65 @@ void setPublishHealthFlag() {
   publishHealthFlag = true;
 }
 
+void msOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->setFont(ArialMT_Plain_10);
+  int sec = millis() / 1000;
+  int min = sec / 60;
+  int hour = min / 60;
+  char* timestr = new char[10];
+  sprintf(timestr, "%02d:%02d:%02d", hour, min % 60, sec % 60);
+  display->drawString(0, 54, timestr);
+  delete timestr;
+}
+
+OverlayCallback overlays[] = { msOverlay,  };
+int overlaysCount = 1;
+
+void drawInfoFrame(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
+  //display->drawXbm(x, y + 12, APP_LOGO_WIDTH, APP_LOGO_HEIGHT, App_Logo_Image_bits);
+  display->setFont(Droid_Sans_Mono_10);
+  display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->drawString(0, 0, "Chip ID: " + String(ESP.getChipId()));
+  display->drawString(0, 10, "Free heap: " + String(ESP.getFreeHeap()/(float)1000) + " KB");
+
+  display->drawString(0, 20, "AP: " + WiFi.SSID());
+  display->drawString(0, 30, "IP: " + WiFi.localIP().toString());
+  display->drawString(0, 40, String("Broker: ") + (client.connected() ? "Connected" : "Disconnected"));
+}
+
+void drawClockFrame(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
+
+}
+
+FrameCallback initFrames[] = { drawInfoFrame, drawClockFrame };
+int initFrameCount = 2;
+
+void initDisplayUI() {
+  //display.flipScreenVertically();
+  ui.setTargetFPS(60);
+  // ui.setActiveSymbol(activeSymbol);
+  // ui.setInactiveSymbol(inactiveSymbol);
+  // ui.setIndicatorPosition(BOTTOM);
+  //
+
+  //ui.setIndicatorDirection(LEFT_RIGHT);
+  ui.disableIndicator();
+  ui.setFrameAnimation(SLIDE_LEFT);
+  ui.setFrames(initFrames, initFrameCount);
+  ui.setOverlays(overlays, overlaysCount);
+  //ui.disableAutoTransition();
+  ui.setTimePerFrame(2000);
+  ui.setTimePerTransition(500);
+  ui.init();
+
+  ui.update();
+
+}
+
 Device d1("switch1", TYPE_SWITCH);
 Device d2("sensor1", TYPE_SENSOR);
 Device d3("switch2", TYPE_SWITCH);
-
-DeviceManager deviceManager;
 
 void publishJsonObject(const char * topic, JsonObject &obj) {
   int length = obj.measureLength() + 1;
@@ -178,7 +242,7 @@ void initWifiManager(uint timeout = 180) {
       Serial.println("Connected to " + WiFi.SSID());
       blink.detach();
       yield();
-      digitalWrite(BLINK_LED, LOW);
+      digitalWrite(BLINK_LED, HIGH);
       initAfterConnected();
     }
   }
@@ -198,6 +262,7 @@ void checkMQTTConnection() {
 
 void setup() {
   Serial.begin(115200);
+  initDisplayUI();
   clientId = accessPointName = "ESP8266-" + String(ESP.getChipId());
   pinMode(BLINK_LED, OUTPUT);
   deviceCommandTopic = "esp_" + String(ESP.getChipId()) + "_command";
@@ -210,16 +275,26 @@ void setup() {
 }
 
 void loop() {
-  checkWiFiConnection();
-  checkMQTTConnection();
-  if (WiFi.status() == WL_CONNECTED) {
-    SSDP_HTTP.handleClient();
+  int remainingTimeBudget = ui.update();
+  if (remainingTimeBudget > 0) {
+    checkWiFiConnection();
+    checkMQTTConnection();
+    if (WiFi.status() == WL_CONNECTED) {
+      SSDP_HTTP.handleClient();
+    }
+
+    if (WiFi.status() == WL_CONNECTED && !client.connected()) {
+      String sid = getSID();
+      login(sid, "DN3L");
+    }
+
+    if (client.connected()) {
+      if (publishHealthFlag) {
+        publishHealthMessage();
+      }
+      client.loop();
+    }
+    delay(remainingTimeBudget);
   }
 
-  if (client.connected()) {
-    if (publishHealthFlag) {
-      publishHealthMessage();
-    }
-    client.loop();
-  }
 }
